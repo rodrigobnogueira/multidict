@@ -57,12 +57,32 @@ class BaseToDictTests:
         assert len(result) == 100
         assert all(len(v) == 100 for v in result.values())
 
-    def test_to_dict_mixed_value_types(self, cls: Any) -> None:
-        """Test to_dict with mixed value types (str, int) to verify generic _V."""
-        d = cls([("a", 1), ("a", "two"), ("b", 3.14)])
+    def test_to_dict_various_value_types(self, cls: Any) -> None:
+        """Test to_dict preserves all Python value types correctly."""
+        obj = object()
+        d = cls([
+            ("str", "hello"),
+            ("int", 42),
+            ("float", 3.14),
+            ("none", None),
+            ("bool", True),
+            ("list", [1, 2]),
+            ("dict", {"k": "v"}),
+            ("tuple", (1, 2)),
+            ("bytes", b"bin"),
+            ("obj", obj),
+        ])
         result = d.to_dict()
-        assert result["a"] == [1, "two"]
-        assert result["b"] == [3.14]
+        assert result["str"] == ["hello"]
+        assert result["int"] == [42]
+        assert result["float"] == [3.14]
+        assert result["none"] == [None]
+        assert result["bool"] == [True]
+        assert result["list"] == [[1, 2]]
+        assert result["dict"] == [{"k": "v"}]
+        assert result["tuple"] == [(1, 2)]
+        assert result["bytes"] == [b"bin"]
+        assert result["obj"] == [obj]
 
 
 class TestMultiDictToDict(BaseToDictTests):
