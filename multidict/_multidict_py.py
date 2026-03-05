@@ -656,20 +656,25 @@ class MultiDict(_CSMixin, MutableMultiMapping[_V]):
         """Return a list of all values matching the key."""
         identity = self._identity(key)
         hash_ = hash(identity)
-        res = []
-        restore = []
-        for slot, idx, e in self._keys.iter_hash(hash_):
-            if e.identity == identity:  # pragma: no branch
-                res.append(e.value)
-                e.hash = -1
-                restore.append(idx)
-
-        if res:
-            entries = self._keys.entries
-            for idx in restore:
-                entries[idx].hash = hash_  # type: ignore[union-attr]
-            return res
-        if not res and default is not sentinel:
+        keys = self._keys
+        mask = keys.mask
+        indices = keys.indices
+        entries = keys.entries
+        result: list[_V] = []
+        i = hash_ & mask
+        perturb = hash_ & sys.maxsize
+        ix = indices[i]
+        while ix != -1:
+            if ix != -2:
+                e = entries[ix]
+                if e is not None and e.hash == hash_ and e.identity == identity:
+                    result.append(e.value)
+            perturb >>= 5
+            i = (i * 5 + perturb + 1) & mask
+            ix = indices[i]
+        if result:
+            return result
+        if default is not sentinel:
             return default
         raise KeyError("Key not found: %r" % key)
 
