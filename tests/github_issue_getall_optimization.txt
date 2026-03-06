@@ -1,0 +1,106 @@
+Title: Proposal: Optimize `getall()` in Pure Python implementation by inlining hash table traversal
+
+---
+
+## Summary
+
+While working on the `to_dict()` feature (#1294), I investigated why `{k: md.getall(k) for k in md.keys()}` was significantly slower than a single-pass approach. I traced the overhead to the `getall()` implementation, which has two performance issues that can be removed with an inlined hash table traversal.
+
+The optimization provides a **~30% speedup** on `getall()` in the pure Python fallback with all existing tests still passing.
+
+## Analysis of the Current Implementation
+
+The current `getall()` delegates to `iter_hash()` (a generator) and performs a hash-marking/restoration cycle:
+
+```python
+def getall(self, key, default=sentinel):
+    identity = self._identity(key)
+    hash_ = hash(identity)
+    res = []
+    restore = []
+    for slot, idx, e in self._keys.iter_hash(hash_):
+        if e.identity == identity:
+            res.append(e.value)
+            e.hash = -1              # mark entry
+            restore.append(idx)
+
+    if res:
+        entries = self._keys.entries
+        for idx in restore:
+            entries[idx].hash = hash_  # restore entry
+        return res
+    if not res and default is not sentinel:
+        return default
+    raise KeyError("Key not found: %r" % key)
+```
+
+### Why the hash marking is unnecessary
+
+The hash marking sets `e.hash = -1` during iteration to prevent `iter_hash()` from yielding the same entry twice. However, this is unnecessary because:
+
+1. Each entry occupies exactly **one slot** in the `indices` array.
+2. The probing sequence in `iter_hash()` is **deterministic** — it walks the collision chain from a starting position.
+3. An entry can only appear at one position in the chain, so it can only be yielded **once** per complete iteration.
+
+### Two sources of overhead
+
+1. **Hash mutation + restoration**: Allocates a `restore` list, mutates every matching entry's hash, then loops to restore them — O(m) extra work for m matches.
+2. **Generator overhead**: `iter_hash()` is a generator. Each `yield`/resume incurs function-call and frame-suspension cost that accumulates over many entries.
+
+## Proposed Change
+
+Inline the hash table traversal directly into `getall()`:
+
+```python
+def getall(self, key, default=sentinel):
+    identity = self._identity(key)
+    hash_ = hash(identity)
+    keys = self._keys
+    mask = keys.mask
+    indices = keys.indices
+    entries = keys.entries
+    result = []
+    i = hash_ & mask
+    perturb = hash_ & sys.maxsize
+    ix = indices[i]
+    while ix != -1:
+        if ix != -2:
+            e = entries[ix]
+            if e is not None and e.hash == hash_ and e.identity == identity:
+                result.append(e.value)
+        perturb >>= 5
+        i = (i * 5 + perturb + 1) & mask
+        ix = indices[i]
+    if result:
+        return result
+    if default is not sentinel:
+        return default
+    raise KeyError("Key not found: %r" % key)
+```
+
+## Benchmark Results
+
+Environment: macOS, Python 3.14.3, pure Python implementation only.
+Each row measures 1000 iterations of calling `getall()` on every unique key.
+Each value is the min of 5 trials with 2 warm-up rounds (most stable, per timeit docs).
+
+Benchmark script: [`tests/benchmark_getall.py`](https://github.com/rodrigobnogueira/multidict/blob/feat/getall-optimization/tests/benchmark_getall.py)
+
+|  Keys | V/Key | Total  | Original (ms) | Optimized (ms) | Speedup |
+|-------|-------|--------|---------------|----------------|---------|
+|    10 |     1 |     10 |         14.19 |          10.86 |   1.31x |
+|    10 |    10 |    100 |         41.92 |          28.86 |   1.45x |
+|   100 |    10 |   1000 |        451.83 |         340.12 |   1.33x |
+|  1000 |    10 |  10000 |       5045.16 |        3977.55 |   1.27x |
+
+## Trade-off: Complexity vs Performance
+
+The main drawback is **code duplication**: the probing logic from `iter_hash()` is inlined into `getall()`. This means `getall()` no longer uses `iter_hash()`, which is still used by 17 other call sites (e.g. `getone`, `__contains__`, `__setitem__`, `__delitem__`, `popone`, `popall`, view classes, etc.).
+
+I'm asking this because I'd like your feedback on whether you see this trade-off as justified before opening a PR:
+
+1. Is the ~30% speedup on the pure Python `getall()` valuable enough to justify the duplicated probing logic?
+2. Would you prefer a different approach, such as keeping `iter_hash()` but converting it from a generator to a list-returning function? (This gives ~4-7% improvement — much smaller.)
+3. Or do you consider the pure Python implementation primarily a reference/fallback where this level of optimization isn't a priority?
+
+I have a ready-to-go implementation on branch [`rodrigobnogueira:feat/getall-optimization`](https://github.com/rodrigobnogueira/multidict/tree/feat/getall-optimization) and can open a PR if the approach is welcome.
