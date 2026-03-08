@@ -751,6 +751,31 @@ class TestMultiDict(BaseMultiDictTest):
         default = object()
         assert d.getall("some_key", default) is default
 
+    def test_getall_no_duplicates_for_probe_revisits(
+        self,
+        multidict_implementation: object,
+        case_sensitive_multidict_class: type[MultiDict[str]],
+    ) -> None:
+        if not getattr(multidict_implementation, "is_pure_python"):
+            pytest.skip("Pure Python specific regression test")
+
+        class _FixedHashStr(str):
+            def __hash__(self) -> int:
+                # 32 produces a probing sequence that revisits slot 0
+                # before encountering an empty slot for small tables.
+                return 32
+
+        class _CollidingMultiDict(case_sensitive_multidict_class):  # type: ignore[misc, valid-type]
+            def _identity(self, key: str) -> str:
+                return _FixedHashStr(key)
+
+        d = _CollidingMultiDict()
+        d.add("target", "value")
+        d.add("other1", "x")
+        d.add("other2", "y")
+
+        assert d.getall("target") == ["value"]
+
     def test_preserve_stable_ordering(
         self,
         cls: type[MultiDict[Union[str, int]]],

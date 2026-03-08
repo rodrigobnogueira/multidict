@@ -661,6 +661,7 @@ class MultiDict(_CSMixin, MutableMultiMapping[_V]):
         indices = keys.indices
         entries = keys.entries
         result: list[_V] = []
+        restore: list[int] = []
         i = hash_ & mask
         perturb = hash_ & sys.maxsize
         ix = indices[i]
@@ -669,10 +670,16 @@ class MultiDict(_CSMixin, MutableMultiMapping[_V]):
                 e = entries[ix]
                 if e is not None and e.hash == hash_ and e.identity == identity:
                     result.append(e.value)
+                    e.hash = -1
+                    restore.append(ix)
             perturb >>= 5
             i = (i * 5 + perturb + 1) & mask
             ix = indices[i]
         if result:
+            for idx in restore:
+                e = entries[idx]
+                if e is not None:
+                    e.hash = hash_
             return result
         if default is not sentinel:
             return default
